@@ -3,6 +3,7 @@ import datetime
 import difflib
 import html as htmllib
 import io
+import math
 import os
 import re
 import zipfile
@@ -11,6 +12,7 @@ import requests
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.hyperlink import Hyperlink
 from openpyxl.worksheet.properties import PageSetupProperties
 
 TOKEN = os.environ.get("NOTION_TOKEN", "").strip()
@@ -33,6 +35,7 @@ AUTO = "自動生成"
 HEAD_ROW = 3
 FIRST = 4
 LOW_LIMIT = 0.8
+HIGH_LIMIT = 1.0
 NAVY_HEX = "1F4E79"
 PREFERRED = ["特別紅利現金價值", "歸原紅利現金價值", "累積非保證每月入息", "終期紅利現金價值"]
 
@@ -45,10 +48,14 @@ DARK = solid("FF" + NAVY_HEX)
 LIGHT = solid("FFDDEBF7")
 PALE = solid("FFF4F7FB")
 WHITE = solid("FFFFFFFF")
+GOOD_FILL = solid("FFE2F0D9")
+LOW_FILL = solid("FFFCE4E4")
 WHITE_BOLD = Font(bold=True, color="FFFFFFFF")
 BLACK_BOLD = Font(bold=True, color="FF000000")
 NAME_FONT = Font(bold=True, color="FF" + NAVY_HEX)
-GREY_FONT = Font(color="FFB5B5B5")
+LINK_FONT = Font(bold=True, underline="single", color="FF" + NAVY_HEX)
+GREY_FONT = Font(color="FFBFBFBF")
+GOOD_FONT = Font(color="FF375623")
 LOW_FONT = Font(color="FFC00000")
 TITLE_FONT = Font(bold=True, size=16, color="FFFFFFFF")
 NOTE_FONT = Font(size=10, color="FF44546A")
@@ -175,19 +182,16 @@ def report_year(recs):
     return c.most_common(1)[0][0] if c else ""
 
 
-def build_rows(recs, cols, with_type, keep=None):
-    rows, skipped = [], []
+def build_rows(recs, cols, with_type):
+    rows = []
     for rec in recs:
-        if keep and not keep(rec["label"]):
-            skipped.append(f"{rec['name']}｜{rec['label']}")
-            continue
         for cur, raws in rec["rows"]:
             m = dict(zip(rec["labels"], raws))
             fixed = [rec["name"], rec["cat"], squash(cur)]
             if with_type:
                 fixed.append(bonus_type(rec["label"]) or "未分類")
             rows.append(fixed + [pct(m.get(c, "")) for c in cols])
-    return rows, skipped
+    return rows
 
 
 def last_is_before(cols):
@@ -208,6 +212,10 @@ def make_header(cols, fixed):
 # ---------- 平均值 ----------
 def mean_or_slash(nums):
     return sum(nums) / len(nums) if nums else "/"
+
+
+def numbers(rows, n_fixed):
+    return [v for r in rows for v in r[n_fixed:] if is_num(v)]
 
 
 def build_summary(n_fixed, cols, groups):
@@ -260,9 +268,42 @@ def light(cell):
     cell.font = BLACK_BOLD
 
 
-def add_sheet(wb, title, heading, notes, header, rows, summary, head_label, n_fixed, widths):
+def heat(cell, v, base):
+    """100% 或以上綠底；低於 80% 紅底；沒有數字用淺灰字。"""
+    if not is_num(v):
+        cell.fill = base
+        cell.font = GREY_FONT
+    elif v >= HIGH_LIMIT:
+        cell.fill = GOOD_FILL
+        cell.font = GOOD_FONT
+    elif v < LOW_LIMIT:
+        cell.fill = LOW_FILL
+        cell.font = LOW_FONT
+    else:
+        cell.fill = base
+
+
+def cat_font(cat):
+    s = str(cat)
+    if "健康" in s:
+        return Font(color="FF2E7D32")
+    if "退休" in s:
+        return Font(color="FFC55A11")
+    return Font(color="FF2F5597")
+
+
+def units(s):
+    return sum(2 if ord(ch) > 255 else 1 for ch in str(s))
+
+
+def row_height(pairs):
+    lines = max(math.ceil(units(s) / max(w - 3, 1)) for s, w in pairs)
+    return max(21, lines * 15 + 6)
+
+
+def add_sheet(wb, title, heading, notes, header, rows, summary, head_label, n_fixed, widths, tab):
     ws = wb.create_sheet(title)
-    ws.sheet_properties.tabColor = NAVY_HEX
+    ws.sheet_properties.tabColor = tab
     ws.sheet_view.showGridLines = False
     last_col = len(header)
     data_end = HEAD_ROW + len(rows)
@@ -305,13 +346,13 @@ def add_sheet(wb, title, heading, notes, header, rows, summary, head_label, n_fi
             cell.fill = base
             if c == 1:
                 cell.font = NAME_FONT
+            elif c == 2:
+                cell.font = cat_font(v)
             elif c > n_fixed:
                 if is_num(v):
                     cell.number_format = "0%"
-                    if v < LOW_LIMIT:
-                        cell.font = LOW_FONT
-                else:
-                    cell.font = GREY_FONT
+                heat(cell, v, base)
+        ws.row_dimensions[rr].height = row_height([(row[k], widths[k]) for k in range(n_fixed)])
 
     if rows:
         ws.auto_filter.ref = f"A{HEAD_ROW}:{get_column_letter(last_col)}{data_end}"
@@ -327,14 +368,14 @@ def add_sheet(wb, title, heading, notes, header, rows, summary, head_label, n_fi
     value_rows = []
     for line in summary["cum"]:
         write_row(ws, r, lc, line)
-        value_rows.append(r)
+        value_rows.append((r, line))
         r += 1
     year_head_row = r
     write_row(ws, r, lc, ["當年平均值"] + summary["year_head"])
     r += 1
     for line in summary["year"]:
         write_row(ws, r, lc, line)
-        value_rows.append(r)
+        value_rows.append((r, line))
         r += 1
     table_end = r - 1
     for rr in range(table_start, table_end + 1):
@@ -349,16 +390,17 @@ def add_sheet(wb, title, heading, notes, header, rows, summary, head_label, n_fi
         light(ws.cell(row=year_head_row, column=c))
     for rr in (table_start, year_head_row):
         ws.row_dimensions[rr].height = 32
-    for vr in value_rows:
+    for vr, line in value_rows:
         light(ws.cell(row=vr, column=lc))
-        for c in range(lc + 1, last_col + 1):
-            cell = ws.cell(row=vr, column=c)
+        ws.row_dimensions[vr].height = row_height([(line[0], max(widths[lc - 1], 16))])
+        for k, v in enumerate(line[1:]):
+            cell = ws.cell(row=vr, column=lc + 1 + k)
             cell.number_format = "0.00%"
-            cell.fill = WHITE
+            heat(cell, v, WHITE)
     note_row = table_end + 1
     ws.cell(row=note_row, column=lc,
             value="「持滿N年平均值」＝保單年度N及之後所有數字的平均；"
-                  "「當年平均值」＝該年度一欄所有數字的平均。平均值為固定數字，不會隨篩選變動。")
+                  "「當年平均值」＝該年度一欄所有數字的平均。平均值計入所有貨幣，為固定數字，不會隨篩選變動。")
     ws.merge_cells(start_row=note_row, start_column=lc, end_row=note_row, end_column=last_col)
     ws.cell(row=note_row, column=lc).font = NOTE_FONT
     ws.cell(row=note_row, column=lc).alignment = LEFT
@@ -375,6 +417,118 @@ def add_sheet(wb, title, heading, notes, header, rows, summary, head_label, n_fi
     ws.page_setup.fitToWidth = 1
     ws.page_setup.fitToHeight = 0
     ws.print_title_rows = f"{HEAD_ROW}:{HEAD_ROW}"
+
+
+def add_overview(wb, year, today, items):
+    """items：[(簡稱, 工作表名稱, 資料行, 固定欄數)]"""
+    ws = wb.create_sheet("概覽", 0)
+    ws.sheet_properties.tabColor = "FFC000"
+    ws.sheet_view.showGridLines = False
+    last_col = 6
+    for i, w in enumerate([36, 18, 18, 18, 18, 18], 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+    def banner(r, value, font, fill, height):
+        cell = ws.cell(row=r, column=1, value=value)
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=last_col)
+        cell.font = font
+        cell.fill = fill
+        cell.alignment = LEFT
+        ws.row_dimensions[r].height = height
+
+    def section(r, value):
+        ws.cell(row=r, column=1, value=value).font = SECTION_FONT
+        ws.row_dimensions[r].height = 26
+
+    def table_head(r, values):
+        for c, v in enumerate(values, 1):
+            cell = ws.cell(row=r, column=c, value=v)
+            dark(cell)
+            cell.alignment = CENTER
+            cell.border = BORDER
+        ws.row_dimensions[r].height = 32
+
+    banner(1, f"保誠分紅表現概覽（報告年度 {year}）", TITLE_FONT, DARK, 40)
+    banner(2, f"資料來源：保誠香港網站｜更新日期：{today}", NOTE_FONT, PALE, 26)
+
+    r = 4
+    section(r, "資料概況")
+    r += 1
+    table_head(r, ["工作表", "產品／版本數", "行數", "有數字的格數", "整體平均值", "低於 80% 的比例"])
+    for _, title, rows, n_fixed in items:
+        nums = numbers(rows, n_fixed)
+        low = sum(1 for v in nums if v < LOW_LIMIT) / len(nums) if nums else "/"
+        vals = [title, len({row[0] for row in rows}), len(rows), len(nums), mean_or_slash(nums), low]
+        r += 1
+        for c, v in enumerate(vals, 1):
+            cell = ws.cell(row=r, column=c, value=v)
+            cell.border = BORDER
+            cell.alignment = LEFT if c == 1 else CENTER
+            cell.fill = WHITE
+        link = ws.cell(row=r, column=1)
+        link.font = LINK_FONT
+        link.hyperlink = Hyperlink(ref=link.coordinate, location=f"'{title}'!A1")
+        ws.cell(row=r, column=5).number_format = "0.00%"
+        heat(ws.cell(row=r, column=5), vals[4], WHITE)
+        ws.cell(row=r, column=6).number_format = "0.0%"
+        ws.row_dimensions[r].height = 24
+
+    r += 2
+    section(r, "按產品種類的整體平均值")
+    r += 1
+    table_head(r, ["產品種類"] + [short for short, _, _, _ in items])
+    cats = []
+    for _, _, rows, _ in items:
+        for row in rows:
+            if row[1] not in cats:
+                cats.append(row[1])
+    for cat in cats:
+        r += 1
+        cell = ws.cell(row=r, column=1, value=cat or "（未分類）")
+        cell.border = BORDER
+        cell.alignment = LEFT
+        cell.font = Font(bold=True, color=cat_font(cat).color)
+        for k, (_, _, rows, n_fixed) in enumerate(items):
+            v = mean_or_slash(numbers([row for row in rows if row[1] == cat], n_fixed))
+            c2 = ws.cell(row=r, column=k + 2, value=v)
+            c2.border = BORDER
+            c2.alignment = CENTER
+            c2.number_format = "0.00%"
+            heat(c2, v, WHITE)
+        ws.row_dimensions[r].height = 24
+
+    r += 2
+    section(r, "顏色說明")
+    samples = [(1.0, "100% 或以上：與銷售時的說明一致或更好"),
+               (0.79, "低於 80%：明顯低於銷售時的說明"),
+               ("/", "沒有數字：產品當時尚未推出、已停售，或網站顯示 N/A")]
+    for v, desc in samples:
+        r += 1
+        cell = ws.cell(row=r, column=1, value=v)
+        cell.border = BORDER
+        cell.alignment = CENTER
+        if is_num(v):
+            cell.number_format = "0%"
+        heat(cell, v, WHITE)
+        d = ws.cell(row=r, column=2, value=desc)
+        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=last_col)
+        d.alignment = LEFT
+        ws.row_dimensions[r].height = 22
+
+    r += 2
+    section(r, "使用提示")
+    tips = ["點上方「資料概況」的工作表名稱，可直接跳到該工作表。",
+            "每個工作表第 3 行有篩選箭嘴，可按產品種類、貨幣或紅利類型篩選。",
+            "向右或向下捲動時，標題列和產品名稱會固定不動。",
+            "平均值摘要在每個工作表最底部。",
+            "手機預覽未必顯示全部格式，建議下載後用 Excel App 開啟。"]
+    for t in tips:
+        r += 1
+        cell = ws.cell(row=r, column=1, value="・" + t)
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=last_col)
+        cell.font = NOTE_FONT
+        cell.alignment = LEFT
+        ws.row_dimensions[r].height = 22
 
 
 # ---------- Notion ----------
@@ -557,13 +711,13 @@ def compare(label, old, new):
     print(f"【{label}】新檔 {len(new)} 行｜舊檔 {len(old)} 行")
     print(f"  完全相同 {len(same)}｜名稱不同但數值相同 {len(renamed_same)}｜數值不同 {len(diff)}"
           f"｜只在新檔 {len(left_new)}｜只在舊檔 {len(left_old)}")
-    for k, o in diff[:8]:
-        print("  不同：", "/".join(k)[:60])
+    for k, o in diff[:30]:
+        print("  不同：", "/".join(k)[:60], "" if k == o else "（舊檔名稱：" + o[0][:30] + "）")
         print("    舊：", " ".join(old[o]))
         print("    新：", " ".join(new[k]))
-    for k in left_new[:8]:
+    for k in left_new[:10]:
         print("  只在新檔：", "/".join(k)[:60])
-    for k in left_old[:8]:
+    for k in left_old[:10]:
         print("  只在舊檔：", "/".join(k)[:60])
 
 
@@ -629,26 +783,33 @@ def check_summary(old, summary):
 
 
 # ---------- 主流程 ----------
-c_recs = load_page(URL_CASH, "總現金價值比率")
+page_recs = load_page(URL_CASH, "總現金價值比率")
 f_recs = load_page(URL_FULFIL, "分紅實現率")
-year = report_year(c_recs)
+year = report_year(page_recs)
 if not year or report_year(f_recs) != year:
     raise SystemExit(f"兩個頁面的報告年度不同或讀不到：{year} / {report_year(f_recs)}，暫不更新")
 
+# 總現金價值頁內：標題含「總現金價值」的是主表，其餘（累積每月入息／年金總額比率）放到另一個工作表
+c_recs = [rec for rec in page_recs if not rec["label"] or "總現金價值" in rec["label"]]
+i_recs = [rec for rec in page_recs if rec["label"] and "總現金價值" not in rec["label"]]
 c_cols = max((rec["labels"] for rec in c_recs), key=len)
 f_cols = max((rec["labels"] for rec in f_recs), key=len)
-c_rows, c_skipped = build_rows(c_recs, c_cols, False, lambda lb: (not lb) or "總現金價值" in lb)
-f_rows, _ = build_rows(f_recs, f_cols, True)
+i_cols = max((rec["labels"] for rec in i_recs), key=len) if i_recs else []
+c_rows = build_rows(c_recs, c_cols, False)
+f_rows = build_rows(f_recs, f_cols, True)
+i_rows = build_rows(i_recs, i_cols, False) if i_cols else []
 
 print()
 print("=== 讀取結果 ===")
-print(f"報告年度 {year}｜總現金價值比率 {len(c_rows)} 行｜分紅實現率 {len(f_rows)} 行")
+print(f"報告年度 {year}｜總現金價值比率 {len(c_rows)} 行｜分紅實現率 {len(f_rows)} 行｜入息總額比率 {len(i_rows)} 行")
 print("年度欄：", " ".join(c_cols))
 print("產品種類：", dict(collections.Counter(r[1] or "（空白）" for r in c_rows)))
 types = collections.Counter(r[3] for r in f_rows)
 print("紅利類型：", "｜".join(f"{k} {v}" for k, v in types.items()))
-if c_skipped:
-    print(f"總現金價值頁略過的其他表格 {len(c_skipped)} 個：", "；".join(c_skipped[:12]))
+print(f"入息總額比率：表格 {len(i_recs)} 個｜標題：",
+      "；".join(sorted({squash(rec["label"]) for rec in i_recs})))
+for row in i_rows[:30]:
+    print("  ", row[0][:24], row[2], " ".join(norm_val(v) for v in row[3:]))
 if len(c_cols) < 5 or len(f_cols) < 5 or len(c_rows) < 40 or len(f_rows) < 80:
     raise SystemExit("讀到的資料太少，保誠網站可能改了版面，暫不更新")
 
@@ -656,31 +817,42 @@ order = [t for t in PREFERRED if t in types] + [t for t in types if t not in PRE
 f_groups = [("所有分紅", f_rows)]
 for t in order:
     sub = [r for r in f_rows if r[3] == t]
-    if any(is_num(v) for r in sub for v in r[4:]):
+    if numbers(sub, 4):
         f_groups.append((t, sub))
 f_summary = build_summary(4, f_cols, f_groups)
 c_summary = build_summary(3, c_cols, [("所有產品", c_rows)])
 
 today = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime("%Y-%m-%d")
-legend = ("「/」＝沒有數字（產品當時尚未推出、已停售，或網站顯示 N/A）。紅色字＝低於 80%。\n"
+legend = ("綠色＝100% 或以上；紅色＝低於 80%；「/」＝沒有數字（產品當時尚未推出、已停售，或網站顯示 N/A）。\n"
           f"資料來源：保誠香港網站（報告年度 {year}）｜更新日期：{today}")
 c_notes = ("總現金價值比率＝實際總現金價值（包括保證現金價值及非保證元素）÷ 銷售時之參考金額。"
            "100% 即與銷售時一致，高於 100% 即比銷售時多。\n" + legend)
 f_notes = ("分紅實現率＝實際派發的累積非保證利益 ÷ 銷售時預期的金額。"
            "100% 即與預期一致，高於 100% 即比預期多。\n" + legend)
+i_notes = ("入息／年金產品的「累積每月入息／每月年金總額比率」，即實際累積派發的總額與銷售時參考金額的比較，"
+           "定義以保誠網站的說明為準。\n" + legend)
 
+c_title, f_title, i_title = f"{year}總現金價值比率", f"{year}分紅實現率", f"{year}入息總額比率"
 wb = Workbook()
 wb.remove(wb.active)
-add_sheet(wb, f"{year}總現金價值比率", f"保誠總現金價值比率（報告年度 {year}）", c_notes,
+add_sheet(wb, c_title, f"保誠總現金價值比率（報告年度 {year}）", c_notes,
           make_header(c_cols, ["产品名称", "产品种类", "货币"]), c_rows, c_summary,
-          "總現金價值比率", 3, [44, 16, 10])
-add_sheet(wb, f"{year}分紅實現率", f"保誠分紅實現率（報告年度 {year}）", f_notes,
+          "總現金價值比率", 3, [50, 16, 10], NAVY_HEX)
+add_sheet(wb, f_title, f"保誠分紅實現率（報告年度 {year}）", f_notes,
           make_header(f_cols, ["产品名称", "产品种类", "货币", "红利类型"]), f_rows, f_summary,
-          "分紅類型", 4, [44, 16, 10, 22])
+          "分紅類型", 4, [50, 16, 10, 24], "2E75B6")
+items = [("總現金價值比率", c_title, c_rows, 3), ("分紅實現率", f_title, f_rows, 4)]
+if i_rows:
+    i_summary = build_summary(3, i_cols, [("所有產品", i_rows)])
+    add_sheet(wb, i_title, f"保誠累積每月入息／年金總額比率（報告年度 {year}）", i_notes,
+              make_header(i_cols, ["产品名称", "产品种类", "货币"]), i_rows, i_summary,
+              "入息總額比率", 3, [50, 16, 10], "C55A11")
+    items.append(("入息總額比率", i_title, i_rows, 3))
+add_overview(wb, year, today, items)
 buf = io.BytesIO()
 wb.save(buf)
 content = buf.getvalue()
-print(f"Excel 檔案 {len(content) // 1024} KB")
+print(f"Excel 檔案 {len(content) // 1024} KB｜工作表：", "、".join(wb.sheetnames))
 
 source = resolve_source(TARGET)
 pages = query_pages(source)
@@ -700,7 +872,7 @@ else:
         check_summary(old_cash_summary(old_c, len(c_cols), "所有產品"), c_summary)
     if old_f is not None:
         compare("分紅實現率", read_old(old_f, 3, len(f_cols)), index_new(f_rows, (0, 2, 3), 4))
-        print("【分紅實現率平均值】")
+        print("【分紅實現率平均值】（按紅利類型的行計入所有貨幣，與手動檔算法不同屬正常）")
         check_summary(old_summary(old_f, 2, len(f_cols)), f_summary)
 
 print()
