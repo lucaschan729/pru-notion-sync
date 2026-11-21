@@ -34,6 +34,8 @@ XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 AUTO = "自動生成"
 HEAD_ROW = 3
 FIRST = 4
+ROW_H = 24
+YEAR_W = 13
 LOW_LIMIT = 0.8
 HIGH_LIMIT = 1.0
 NAVY_HEX = "1F4E79"
@@ -65,6 +67,8 @@ GROUP = Side(style="thin", color="FF7F9BBF")
 BORDER = Border(left=LINE, right=LINE, top=LINE, bottom=LINE)
 CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
 LEFT = Alignment(horizontal="left", vertical="center", wrap_text=True, indent=1)
+CENTER_FIT = Alignment(horizontal="center", vertical="center", shrink_to_fit=True)
+LEFT_FIT = Alignment(horizontal="left", vertical="center", shrink_to_fit=True, indent=1)
 
 
 # ---------- 讀取保誠網頁 ----------
@@ -296,17 +300,22 @@ def units(s):
     return sum(2 if ord(ch) > 255 else 1 for ch in str(s))
 
 
-def row_height(pairs):
-    lines = max(math.ceil(units(s) / max(w - 3, 1)) for s, w in pairs)
-    return max(21, lines * 15 + 6)
+def fit_width(values, low, cap):
+    """按最長的文字決定欄闊；超過上限的文字會自動縮小字體。"""
+    longest = max([units(v) for v in values] or [0])
+    return min(max(math.ceil(longest * 1.1) + 4, low), cap)
 
 
-def add_sheet(wb, title, heading, notes, header, rows, summary, head_label, n_fixed, widths, tab):
+def add_sheet(wb, title, heading, notes, header, rows, summary, head_label, n_fixed, tab):
     ws = wb.create_sheet(title)
     ws.sheet_properties.tabColor = tab
     ws.sheet_view.showGridLines = False
     last_col = len(header)
     data_end = HEAD_ROW + len(rows)
+    lows = [30, 12, 10, 14]
+    caps = [52, 24, 12, 44]
+    widths = [fit_width([header[k]] + [row[k] for row in rows], lows[k], caps[k])
+              for k in range(n_fixed)]
 
     ws.cell(row=1, column=1, value=heading)
     ws.cell(row=2, column=1, value=notes)
@@ -342,7 +351,7 @@ def add_sheet(wb, title, heading, notes, header, rows, summary, head_label, n_fi
         for c, v in enumerate(row, 1):
             cell = ws.cell(row=rr, column=c, value=v)
             cell.border = border
-            cell.alignment = LEFT if c == 1 else CENTER
+            cell.alignment = LEFT_FIT if c == 1 else CENTER_FIT
             cell.fill = base
             if c == 1:
                 cell.font = NAME_FONT
@@ -352,7 +361,7 @@ def add_sheet(wb, title, heading, notes, header, rows, summary, head_label, n_fi
                 if is_num(v):
                     cell.number_format = "0%"
                 heat(cell, v, base)
-        ws.row_dimensions[rr].height = row_height([(row[k], widths[k]) for k in range(n_fixed)])
+        ws.row_dimensions[rr].height = ROW_H
 
     if rows:
         ws.auto_filter.ref = f"A{HEAD_ROW}:{get_column_letter(last_col)}{data_end}"
@@ -360,7 +369,7 @@ def add_sheet(wb, title, heading, notes, header, rows, summary, head_label, n_fi
     lc = n_fixed
     r = data_end + 2
     ws.cell(row=r, column=lc, value="平均值摘要").font = SECTION_FONT
-    ws.row_dimensions[r].height = 26
+    ws.row_dimensions[r].height = ROW_H
     r += 1
     table_start = r
     write_row(ws, r, lc, [head_label] + summary["head"])
@@ -391,10 +400,13 @@ def add_sheet(wb, title, heading, notes, header, rows, summary, head_label, n_fi
     for rr in (table_start, year_head_row):
         ws.row_dimensions[rr].height = 32
     for vr, line in value_rows:
-        light(ws.cell(row=vr, column=lc))
-        ws.row_dimensions[vr].height = row_height([(line[0], max(widths[lc - 1], 16))])
+        label_cell = ws.cell(row=vr, column=lc)
+        light(label_cell)
+        label_cell.alignment = CENTER_FIT
+        ws.row_dimensions[vr].height = ROW_H
         for k, v in enumerate(line[1:]):
             cell = ws.cell(row=vr, column=lc + 1 + k)
+            cell.alignment = CENTER_FIT
             cell.number_format = "0.00%"
             heat(cell, v, WHITE)
     note_row = table_end + 1
@@ -404,12 +416,12 @@ def add_sheet(wb, title, heading, notes, header, rows, summary, head_label, n_fi
     ws.merge_cells(start_row=note_row, start_column=lc, end_row=note_row, end_column=last_col)
     ws.cell(row=note_row, column=lc).font = NOTE_FONT
     ws.cell(row=note_row, column=lc).alignment = LEFT
-    ws.row_dimensions[note_row].height = 30
+    ws.row_dimensions[note_row].height = 32
 
     for i in range(1, last_col + 1):
-        w = widths[i - 1] if i <= n_fixed else 13
+        w = widths[i - 1] if i <= n_fixed else YEAR_W
         if i == lc:
-            w = max(w, 16)
+            w = max(w, 18)
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.freeze_panes = ws.cell(row=FIRST, column=2)
     ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
@@ -438,18 +450,18 @@ def add_overview(wb, year, today, items):
 
     def section(r, value):
         ws.cell(row=r, column=1, value=value).font = SECTION_FONT
-        ws.row_dimensions[r].height = 26
+        ws.row_dimensions[r].height = ROW_H
 
     def table_head(r, values):
         for c, v in enumerate(values, 1):
             cell = ws.cell(row=r, column=c, value=v)
             dark(cell)
-            cell.alignment = CENTER
+            cell.alignment = CENTER_FIT
             cell.border = BORDER
-        ws.row_dimensions[r].height = 32
+        ws.row_dimensions[r].height = ROW_H
 
     banner(1, f"保誠分紅表現概覽（報告年度 {year}）", TITLE_FONT, DARK, 40)
-    banner(2, f"資料來源：保誠香港網站｜更新日期：{today}", NOTE_FONT, PALE, 26)
+    banner(2, f"資料來源：保誠香港網站｜更新日期：{today}", NOTE_FONT, PALE, ROW_H)
 
     r = 4
     section(r, "資料概況")
@@ -463,7 +475,7 @@ def add_overview(wb, year, today, items):
         for c, v in enumerate(vals, 1):
             cell = ws.cell(row=r, column=c, value=v)
             cell.border = BORDER
-            cell.alignment = LEFT if c == 1 else CENTER
+            cell.alignment = LEFT_FIT if c == 1 else CENTER_FIT
             cell.fill = WHITE
         link = ws.cell(row=r, column=1)
         link.font = LINK_FONT
@@ -471,7 +483,7 @@ def add_overview(wb, year, today, items):
         ws.cell(row=r, column=5).number_format = "0.00%"
         heat(ws.cell(row=r, column=5), vals[4], WHITE)
         ws.cell(row=r, column=6).number_format = "0.0%"
-        ws.row_dimensions[r].height = 24
+        ws.row_dimensions[r].height = ROW_H
 
     r += 2
     section(r, "按產品種類的整體平均值")
@@ -486,16 +498,16 @@ def add_overview(wb, year, today, items):
         r += 1
         cell = ws.cell(row=r, column=1, value=cat or "（未分類）")
         cell.border = BORDER
-        cell.alignment = LEFT
+        cell.alignment = LEFT_FIT
         cell.font = Font(bold=True, color=cat_font(cat).color)
         for k, (_, _, rows, n_fixed) in enumerate(items):
             v = mean_or_slash(numbers([row for row in rows if row[1] == cat], n_fixed))
             c2 = ws.cell(row=r, column=k + 2, value=v)
             c2.border = BORDER
-            c2.alignment = CENTER
+            c2.alignment = CENTER_FIT
             c2.number_format = "0.00%"
             heat(c2, v, WHITE)
-        ws.row_dimensions[r].height = 24
+        ws.row_dimensions[r].height = ROW_H
 
     r += 2
     section(r, "顏色說明")
@@ -506,14 +518,14 @@ def add_overview(wb, year, today, items):
         r += 1
         cell = ws.cell(row=r, column=1, value=v)
         cell.border = BORDER
-        cell.alignment = CENTER
+        cell.alignment = CENTER_FIT
         if is_num(v):
             cell.number_format = "0%"
         heat(cell, v, WHITE)
         d = ws.cell(row=r, column=2, value=desc)
         ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=last_col)
-        d.alignment = LEFT
-        ws.row_dimensions[r].height = 22
+        d.alignment = LEFT_FIT
+        ws.row_dimensions[r].height = ROW_H
 
     r += 2
     section(r, "使用提示")
@@ -527,8 +539,8 @@ def add_overview(wb, year, today, items):
         cell = ws.cell(row=r, column=1, value="・" + t)
         ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=last_col)
         cell.font = NOTE_FONT
-        cell.alignment = LEFT
-        ws.row_dimensions[r].height = 22
+        cell.alignment = LEFT_FIT
+        ws.row_dimensions[r].height = ROW_H
 
 
 # ---------- Notion ----------
@@ -837,16 +849,16 @@ wb = Workbook()
 wb.remove(wb.active)
 add_sheet(wb, c_title, f"保誠總現金價值比率（報告年度 {year}）", c_notes,
           make_header(c_cols, ["产品名称", "产品种类", "货币"]), c_rows, c_summary,
-          "總現金價值比率", 3, [50, 16, 10], NAVY_HEX)
+          "總現金價值比率", 3, NAVY_HEX)
 add_sheet(wb, f_title, f"保誠分紅實現率（報告年度 {year}）", f_notes,
           make_header(f_cols, ["产品名称", "产品种类", "货币", "红利类型"]), f_rows, f_summary,
-          "分紅類型", 4, [50, 16, 10, 24], "2E75B6")
+          "分紅類型", 4, "2E75B6")
 items = [("總現金價值比率", c_title, c_rows, 3), ("分紅實現率", f_title, f_rows, 4)]
 if i_rows:
     i_summary = build_summary(3, i_cols, [("所有產品", i_rows)])
     add_sheet(wb, i_title, f"保誠累積每月入息／年金總額比率（報告年度 {year}）", i_notes,
               make_header(i_cols, ["产品名称", "产品种类", "货币"]), i_rows, i_summary,
-              "入息總額比率", 3, [50, 16, 10], "C55A11")
+              "入息總額比率", 3, "C55A11")
     items.append(("入息總額比率", i_title, i_rows, 3))
 add_overview(wb, year, today, items)
 buf = io.BytesIO()
