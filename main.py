@@ -35,10 +35,14 @@ AUTO = "自動生成"
 HEAD_ROW = 3
 FIRST = 4
 ROW_H = 24
+SEP_H = 8
 YEAR_W = 13
 LOW_LIMIT = 0.8
 HIGH_LIMIT = 1.0
 NAVY_HEX = "1F4E79"
+NAME_COLOR = "FF1F2933"   # 產品名稱顏色（深灰黑）
+CUR_COLOR = "FF7030A0"    # 貨幣顏色（紫）
+SEP_COLOR = "FFE9ECEF"    # 產品之間分隔行的顏色（淺灰）
 PREFERRED = ["特別紅利現金價值", "歸原紅利現金價值", "累積非保證每月入息", "終期紅利現金價值"]
 
 
@@ -50,11 +54,13 @@ DARK = solid("FF" + NAVY_HEX)
 LIGHT = solid("FFDDEBF7")
 PALE = solid("FFF4F7FB")
 WHITE = solid("FFFFFFFF")
+SEP_FILL = solid(SEP_COLOR)
 GOOD_FILL = solid("FFE2F0D9")
 LOW_FILL = solid("FFFCE4E4")
 WHITE_BOLD = Font(bold=True, color="FFFFFFFF")
 BLACK_BOLD = Font(bold=True, color="FF000000")
-NAME_FONT = Font(bold=True, color="FF" + NAVY_HEX)
+NAME_FONT = Font(bold=True, color=NAME_COLOR)
+CUR_FONT = Font(bold=True, color=CUR_COLOR)
 LINK_FONT = Font(bold=True, underline="single", color="FF" + NAVY_HEX)
 GREY_FONT = Font(color="FFBFBFBF")
 GOOD_FONT = Font(color="FF375623")
@@ -311,7 +317,6 @@ def add_sheet(wb, title, heading, notes, header, rows, summary, head_label, n_fi
     ws.sheet_properties.tabColor = tab
     ws.sheet_view.showGridLines = False
     last_col = len(header)
-    data_end = HEAD_ROW + len(rows)
     lows = [30, 12, 10, 14]
     caps = [52, 24, 12, 44]
     widths = [fit_width([header[k]] + [row[k] for row in rows], lows[k], caps[k])
@@ -337,14 +342,16 @@ def add_sheet(wb, title, heading, notes, header, rows, summary, head_label, n_fi
         cell.border = BORDER
     ws.row_dimensions[HEAD_ROW].height = 42
 
-    band = False
+    rr = FIRST
     for i, row in enumerate(rows):
-        rr = FIRST + i
         first = i == 0 or rows[i - 1][0] != row[0]
         last = i == len(rows) - 1 or rows[i + 1][0] != row[0]
         if first and i > 0:
-            band = not band
-        base = PALE if band else WHITE
+            # 產品之間的分隔行：整行合併
+            ws.cell(row=rr, column=1).fill = SEP_FILL
+            ws.merge_cells(start_row=rr, start_column=1, end_row=rr, end_column=last_col)
+            ws.row_dimensions[rr].height = SEP_H
+            rr += 1
         border = Border(left=LINE, right=LINE,
                         top=GROUP if first else LINE,
                         bottom=GROUP if last else LINE)
@@ -352,16 +359,20 @@ def add_sheet(wb, title, heading, notes, header, rows, summary, head_label, n_fi
             cell = ws.cell(row=rr, column=c, value=v)
             cell.border = border
             cell.alignment = LEFT_FIT if c == 1 else CENTER_FIT
-            cell.fill = base
+            cell.fill = WHITE
             if c == 1:
                 cell.font = NAME_FONT
             elif c == 2:
                 cell.font = cat_font(v)
+            elif c == 3:
+                cell.font = CUR_FONT
             elif c > n_fixed:
                 if is_num(v):
                     cell.number_format = "0%"
-                heat(cell, v, base)
+                heat(cell, v, WHITE)
         ws.row_dimensions[rr].height = ROW_H
+        rr += 1
+    data_end = rr - 1
 
     if rows:
         ws.auto_filter.ref = f"A{HEAD_ROW}:{get_column_letter(last_col)}{data_end}"
@@ -387,9 +398,9 @@ def add_sheet(wb, title, heading, notes, header, rows, summary, head_label, n_fi
         value_rows.append((r, line))
         r += 1
     table_end = r - 1
-    for rr in range(table_start, table_end + 1):
+    for row_i in range(table_start, table_end + 1):
         for c in range(lc, last_col + 1):
-            cell = ws.cell(row=rr, column=c)
+            cell = ws.cell(row=row_i, column=c)
             cell.alignment = CENTER
             cell.border = BORDER
     for c in range(lc, last_col + 1):
@@ -397,8 +408,8 @@ def add_sheet(wb, title, heading, notes, header, rows, summary, head_label, n_fi
     dark(ws.cell(row=year_head_row, column=lc))
     for c in range(lc + 1, last_col + 1):
         light(ws.cell(row=year_head_row, column=c))
-    for rr in (table_start, year_head_row):
-        ws.row_dimensions[rr].height = 32
+    for row_i in (table_start, year_head_row):
+        ws.row_dimensions[row_i].height = 32
     for vr, line in value_rows:
         label_cell = ws.cell(row=vr, column=lc)
         light(label_cell)
