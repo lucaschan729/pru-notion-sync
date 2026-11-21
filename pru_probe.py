@@ -1,3 +1,4 @@
+import html as htmllib
 import re
 
 import requests
@@ -7,31 +8,61 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 URLS = [
     "https://www.prudential.com.hk/tc/general/performance/total-cash-value-ratio/",
     "https://www.prudential.com.hk/tc/general/performance/fulfillment-ratio/",
-    "https://www.prudential.com.hk/performance/fulfillment-ratio/tc/",
 ]
+
+
+def text(s):
+    s = re.sub(r"<(script|style)\b.*?</\1>", "", s, flags=re.S | re.I)
+    s = re.sub(r"<[^>]+>", " ", s)
+    return re.sub(r"\s+", " ", htmllib.unescape(s)).strip()
+
+
+def attr(tag, name):
+    m = re.search(r"\s" + name + r'="([^"]*)"', tag)
+    return m.group(1) if m else ""
+
 
 for url in URLS:
     print()
-    print("=====", url)
-    try:
-        r = requests.get(url, headers={"User-Agent": UA, "Accept-Language": "zh-HK,zh;q=0.9"}, timeout=60)
-    except Exception as e:
-        print("失敗：", str(e)[:200])
-        continue
+    print("=====", url.rstrip("/").split("/")[-1])
+    r = requests.get(url, headers={"User-Agent": UA, "Accept-Language": "zh-HK,zh;q=0.9"}, timeout=60)
     r.encoding = "utf-8"
-    html = r.text
-    print(f"狀態 {r.status_code}｜最終網址 {r.url}｜長度 {len(html)}")
-    print(f"table {html.count('<table')}｜% {html.count('%')}｜雋陞 {html.count('雋陞')}｜iframe {html.count('<iframe')}")
-    files = sorted(set(re.findall(r"[\"']([^\"'\s<>]+\.(?:json|xlsx|csv|pdf)[^\"'\s<>]*)[\"']", html)))
-    for x in files[:40]:
-        print("  檔案：", x[:200])
-    apis = sorted(set(re.findall(r"[\"']([^\"'\s<>]*(?:/api/|graphql|ajax|/bin/)[^\"'\s<>]*)[\"']", html)))
-    for x in apis[:40]:
-        print("  介面：", x[:200])
-    frames = re.findall(r"<iframe[^>]+src=[\"']([^\"']+)", html)
-    for x in frames[:10]:
-        print("  iframe：", x[:200])
-    i = html.find("雋陞")
-    if i >= 0:
-        print("--- 產品名稱附近的內容 ---")
-        print(re.sub(r"\s+", " ", html[max(0, i - 300):i + 1500]))
+    page = r.text
+    print(f"狀態 {r.status_code}｜長度 {len(page)}")
+
+    tabs = [(re.sub(r"-tab$", "", attr(m.group(1), "id")), text(m.group(2)))
+            for m in re.finditer(r'(<li\b[^>]*role="tab"[^>]*>)(.*?)</li>', page, flags=re.S)]
+    print(f"分頁 {len(tabs)} 個：", "｜".join(f"{i}={n}" for i, n in tabs))
+
+    panels = [(m.start(), attr(m.group(0), "id"))
+              for m in re.finditer(r'<div\b[^>]*role="tabpanel"[^>]*>', page)]
+    tables = [(m.start(), m.group(0))
+              for m in re.finditer(r"<table\b.*?</table>", page, flags=re.S | re.I)]
+
+    def owner(pos):
+        pid = "(無)"
+        for start, i in panels:
+            if start > pos:
+                break
+            pid = i
+        return pid
+
+    groups = {}
+    for pos, t in tables:
+        groups.setdefault(owner(pos), []).append((pos, t))
+    print(f"表格 {len(tables)} 個：", " ".join(f"{k.replace('-tabpanel', '')}:{len(v)}" for k, v in groups.items()))
+
+    picks = list(groups)[:1]
+    if "egs-tabpanel" in groups and "egs-tabpanel" not in picks:
+        picks.append("egs-tabpanel")
+    for pid in picks:
+        print(f"--- 面板 {pid}")
+        for n, (pos, t) in enumerate(groups[pid][:2], 1):
+            rows = re.findall(r"<tr\b.*?</tr>", t, flags=re.S | re.I)
+            print(f"[表格{n}｜{len(rows)} 行] 前文：{text(page[max(0, pos - 1500):pos])[-160:]}")
+            for tr in rows[:8]:
+                cells = []
+                for tag, at, body in re.findall(r"<(t[hd])\b([^>]*)>(.*?)</t[hd]>", tr, flags=re.S | re.I):
+                    mark = "".join(f"[{k[0]}{attr(' ' + at, k)}]" for k in ("colspan", "rowspan") if attr(" " + at, k))
+                    cells.append(text(body) + mark)
+                print("  " + " | ".join(cells))
